@@ -17,7 +17,7 @@ Kaggle_YourCabs_score.csv - the data set to be classified. Includes 10,000 booki
 Kaggle_YourCabs_sample.csv - a sample submission file in the correct format. Your entry should include the id column from this file and a Car_Cancelled column with 0,1 values.
 
 ## Data fields
-id - booking ID
+*id - booking ID
 
 user_id - the ID of the customer (based on mobile number)
 
