@@ -9,7 +9,9 @@ Participants need to upload their classifications (0=no cancellation or 1=cancel
 
 ## Data File descriptions
 Kaggle_YourCabs_training.csv - the training set (over 43,000 bookings). Includes the output Car_Cancellation and the misclassification costs in Cost_of_error.
+
 Kaggle_YourCabs_score.csv - the data set to be classified. Includes 10,000 bookings and no output column.
+
 Kaggle_YourCabs_sample.csv - a sample submission file in the correct format. Your entry should include the id column from this file and a Car_Cancelled column with 0,1 values.
 
 ## Data fields
