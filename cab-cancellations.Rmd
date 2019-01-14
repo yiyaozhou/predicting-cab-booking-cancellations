@@ -1,0 +1,297 @@
+---
+title: "Predicting Cab Booking Cancellations"
+author: "Yiyao Zhou"
+date: "February 2018"
+output:
+  word_document: default
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+## Data preprocessing - Variable Selection
+First, read csv file as “dataframe” and examine the structure of our dataframe.
+```{r, warning=FALSE, message=FALSE}
+library(ggplot2)
+library(dplyr)
+library(rpart)
+library(rpart.plot)
+library(caret)
+
+taxi_all.df <- read.csv("Kaggle_YourCabs_training.csv", na.strings="NULL")
+str(taxi_all.df)
+summary(taxi_all.df)
+
+# plot
+# Cancellation rate by travelType
+travelType <- taxi_all.df %>% 
+  group_by(travel_type_id) %>% 
+  summarise(Cancellation = sum(Car_Cancellation)/length(Car_Cancellation))
+ggplot(travelType, aes(y = Cancellation, x = travel_type_id)) + 
+  geom_bar(stat = "identity", position = "Stack") + 
+  scale_fill_brewer(palette = "Set1") + 
+  theme_light() + 
+  ggtitle("Cancellation rate by day type of travel") + xlab("")
+
+# Cancellation rate by booking methods
+taxi_all.df$booking_method = NA
+taxi_all.df$booking_method[which(taxi_all.df$mobile_site_booking == 1)] = "Mobile Site"
+taxi_all.df$booking_method[which(taxi_all.df$online_booking == 1)] = "Online"
+taxi_all.df$booking_method[is.na(taxi_all.df$booking_method)] = "Phone Call"
+method <- taxi_all.df %>% 
+  group_by(booking_method) %>% 
+  summarise(Cancellation = sum(Car_Cancellation)/length(Car_Cancellation))
+# Bar plot that shows cancellation rate for each type of booking method
+ggplot(method, aes(y = Cancellation, x = booking_method, fill = booking_method)) + 
+      geom_bar(stat = "identity", position = "Stack") + 
+      scale_fill_brewer(palette = "Greys") + 
+      theme_light() + 
+      ggtitle("Cancellation rate by method of booking")
+
+# Cancellation rate by weekdays
+taxi_all.df$weekday = weekdays(as.Date(taxi_all.df$from_date))
+weekday <- taxi_all.df %>% 
+  group_by(weekday) %>% 
+  summarise(Cancellation = sum(Car_Cancellation)/length(Car_Cancellation))
+weekday$weekday  = as.character(weekday$weekday)
+weekday$weekday = factor(weekday$weekday, levels= c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+weekday = weekday[order(weekday$weekday),]
+weekday = na.omit(weekday)
+ggplot(weekday, aes(y = Cancellation, x = weekday, fill = weekday)) + 
+  geom_bar(stat = "identity", position = "Stack") + 
+  scale_fill_brewer(palette = "Blues") +
+  theme_light() + 
+  ggtitle("Cancellation rate by day of the week") + xlab("")
+
+
+```
+There are 43431 observations and 20 variables. According to the data dictionary, the independent variables can be classfied into 6 categories.
+
+The input identifies specific user: user_id. This variable may affect the cancellation if drivers have the access to the evaluation of customers, but the user_id cannot represent such detail.
+
+The input identifies the vehicle model type: vehicle_model_id. It may affect the cancellation. For example, a van driver tends to not cancel the reservation if he has less reservation compared to a compact car.
+
+The inputs related to the travel type: travel_type_id and package_id. A longer travel distance and duration may lead to a cancellation.
+
+The inputs related to booking methods: online_booking and mobile_site_booking. These two dummy variables show the three different booking methods: online, mobile site, and phone call. The booking methods can be a predictor. For example, the online booking may have a higher probability of cancellation if the driver thinks it not reliable compared with the traditional methods.
+
+The inputs related to location: from_area_id, to_area_id, from_city_id, to_city_id, from_lat, from_long, to_lat, to_long. Location is a key point to affect the cancellation. For example, drivers may not be willing to go to a remote place. We choose “from_lat”, “from_long”, “to_lat”, “to_long” because of the generality. 
+
+The inputs related to date and time: from_date, to_date, booking_created. Time is another key point we should consider. For instance, a weekend trip may have a higher cancel probability. 
+
+According to analysis, we assume that the factors related to drivers’ “cancel” decision are vehicle model type,  travel type, booking methods, location, and time, which include “travel_type_id”, “vehicle_model_id”, “online_booking”, “mobile_site_booking”,  “from_lat”, “from_long”, “to_lat”, “to_long”, “from_date”, “booking_created”.
+
+## Data preprocessing - Data Cleaning and Aggregation
+We used two approaches to read the dataset: by adding the parameter na.strings = "NULL", we got "to_lat" and "to_long" columns as numeric type; without this parameter, we got "from_lat" and "from_long" as numerical type.These efforts were preparation for future processing.
+
+Then we dropped unrelated columns, such as row and user_id, and columns that contain too many null data, such as package_id, from_city, and to_city variables. Since from_area and to_area are unique to point-to-point travel, we also dropped them and used latitude and longitude variables as location predictors. 
+
+We also converted "Car_Cancellation", "online_booking" and "mobile_site_booking" into factor type. To make the latitude and longitude data consistent, we put the numeric "from_lat" and "from_long" columns in taxi_raw2.df in taxi.df so all the latitude and longitude variables are numeric type now. 
+
+We decided to leave the NULL entries in the dataset rather than replace them with average or median value. The reason is that tree model can well handle NULL entries without ignoring the whole observation, and putting average or median value in those variables may result in biases in the final tree model.
+
+We also processed the time/date data for effective use. The interval between the booking time and trip start time will affect the cancellation probability, the longer the interval, the higher probability that drivers cancel the order. Therefore, we created a new variable "time_lag" which is the time interval between "booking_created" and "from_date", instead of the two separate time variables. Lastly, to see how weekdays and weekends can affect the order cancellations, we created "from_date_weekDays" variable. 
+
+```{r, message=FALSE, echo=TRUE}
+
+taxi_raw1.df <- read.csv("/Users/yiyao/Desktop/Taxi_case.csv",na.strings="NULL") # Read data into raw1 dataframe which read NULL as NA
+taxi_raw2.df <- read.csv("/Users/yiyao/Desktop/Taxi_case.csv")                   # Read data into raw2 dataframe without dealing with NULL
+taxi.df <- taxi_raw1.df[ , -c(1, 2, 4, 6, 7, 8, 9, 11)]  # Drop unrelated columns
+
+taxi.df$Car_Cancellation = as.factor(taxi.df$Car_Cancellation) # Convert Car_Cancellation into factors
+taxi.df$online_booking = as.factor(taxi.df$online_booking) # Convert online_booking to factors
+taxi.df$mobile_site_booking = as.factor(taxi.df$mobile_site_booking) # Convert mobile_site_booking to factors
+taxi.df$travel_type_id= as.factor(taxi.df$travel_type_id) # Convert travel_type_id to factors
+taxi.df$from_lat = taxi_raw2.df$from_lat # Replace from_lat with the numeric one in raw2 dataframe
+taxi.df$from_long = taxi_raw2.df$from_long # Replace from_long with the numeric one in raw2 dataframe
+
+# Convert from_date and booking_created columns to time_lag and from_date_weekDays column
+taxi.df$time_lag <- as.numeric(taxi.df$from_date - taxi.df$booking_created)
+taxi.df$from_date <- as.Date(taxi.df$from_date, origin = "1899-12-30")
+taxi.df$from_date_weekDays <- weekdays(as.Date(taxi.df$from_date))
+taxi.df$from_date_weekDays = as.factor(taxi.df$from_date_weekDays)
+taxi.df <- taxi.df[ , -c(3, 6)] 
+```
+
+## Summarize the data
+After doing some data preprocessing, we have selected "vehicle_model_id", "travel_type_id", "online_booking", "mobile_site_booking", "from_lat", "from_long", "to_lat", "to_long", "Car_Cancellation", "time_lag",and "from_date_weekDays" as our predictors. 
+```{r}
+str(taxi.df)
+```
+Here is a summary of our input variables.
+
+"vehicle_model_id", represents the different vehicle model type. The vehicle model could be related to drivers' wealth, which decides the importance of the job to the driver. 
+
+"travel_type_id", has three different levels(1, 2, 3), which represent "long distance", "point to point", "hourly rental", respectivlely. A longer travel distance may lead to a cancellation.
+
+"online_booking" and "mobile_site_booking" are dummy variables, which represent three different booking methods. When "online_booking" = 1, "mobile_site_booking" = 0, it refers to the method "booking online". When "online_booking" = 0, "mobile_site_booking" = 1, it refers to the method "booking on mobile site". When "online_booking" = 0, "mobile_site_booking" = 0, it refers to the method "booking on phone call".
+
+"from_lat" and "from_long" represent the location of the trip start. "to_lat" and "to_long" represent the location of the trip destination. 
+
+"time_lag" is the time difference between the customers' booking time and the scheduled departure time. It is stored as a numerical variable.
+
+"from_date_weekDays" is a factor variable, which has 7 levels with weekday labels to identify different weekdays. 
+
+"Car_Cancellation" is the dependent variable. "1" represents cancellation and "0" represents no cancellation.
+
+## Train the model
+We sampled 80% of the dataset into train.df and 20% into valid.df.
+
+Then we generated a default tree using train data, plotted the tree and displayed the confusionMatrix of predicting train data.
+
+The default tree only has one node which simply classifies every observation into "0", and the accuracy for predicting the training data is 92.64%.
+
+We think the reason for this default tree structure is that the Cancellation rate is so low that simply predicting no cancellation would have higher accuracy than making efforts to predict any cancellation.
+```{r}
+# Seperate dataset into train set and validation set
+set.seed(1)  
+train.index <- sample(c(1:dim(taxi.df)[1]), dim(taxi.df)[1]*0.8)  
+train.df <- taxi.df[train.index, ]
+valid.df <- taxi.df[-train.index, ]
+
+# Generate classification tree
+default.ct <- rpart(Car_Cancellation ~ ., data = train.df, method = "class")
+
+# plot tree
+prp(default.ct, type = 1, extra = 1, under = TRUE, split.font = 1, varlen = -10)
+
+# generate confusion matrix for training data
+default.ct.point.pred.train <- predict(default.ct,train.df,type = "class")
+confusionMatrix(default.ct.point.pred.train, train.df$Car_Cancellation)
+```
+
+## See performance on validation data
+The performance on validation data has 92.47% accuracy but still make no prediction on "1" level.
+```{r}
+# Generate confusion matrix for validation data
+default.ct.point.pred.valid <- predict(default.ct,valid.df,type = "class")
+confusionMatrix(default.ct.point.pred.valid, valid.df$Car_Cancellation)
+```
+
+## Generate a deeper tree and see performance on validation data
+We generate a deeper tree, set cp to zero to make the tree as deep as possible. The deeper tree has length over 700. The performance of deeper tree on valiadation data is poor because of the overfitting problem.
+```{r}
+deeper.ct <- rpart(Car_Cancellation ~ ., data = train.df, method = "class", cp = 0, minsplit = 1)
+# count number of leaves
+length(deeper.ct$frame$var[deeper.ct$frame$var == "<leaf>"])
+# plot tree
+prp(deeper.ct, type = 1, extra = 1, under = TRUE, split.font = 1, varlen = -10, 
+    box.col=ifelse(deeper.ct$frame$var == "<leaf>", 'gray', 'white'))  
+# Make prediction on validation data.
+deeper.ct.point.pred.train <- predict(deeper.ct,valid.df,type = "class")
+# Generate confusion matrix for validation data
+confusionMatrix(deeper.ct.point.pred.train, valid.df$Car_Cancellation)
+```
+
+## Use cross-validation to prune the tree
+We used the cross-validation method to prune the tree.
+
+First, we set the cross-validation parameters to generate cp table and print it out. From the cp table, we found that when cp decreases, xerror increases, so the cp has the lowest xerror still be the one with no split at all. 
+
+We further investigated the accuracy of different cp by using a loop. We stored each tree's accuracy in variable c and printed it out after the loop. We found that accuracy decreases with cp decreases, which consistent with the performance measured by xerror.
+
+But we cannot choose the optimal cp for its confusionMatrix has no positive true, which means it would never classify a "1" in cancellation. Alternatively, we selected the second large cp with roughly the same xerror and accuracy to prune the tree. This cp can guarantee the model the ability to predict positive true.
+
+The pruned tree has length of 16, and its performance on validation data generate an accuracy of 92.07% with 7 true positive prediction.
+```{r}
+# Generate cp table
+cv.ct <- rpart(Car_Cancellation ~ ., data = train.df, method = "class", 
+               cp = 0, minsplit = 5, xval = 5)
+# use printcp() to print the table. 
+printcp(cv.ct)
+
+# Use variable c to store accuracy data for different cp and print it out
+c <- list()
+
+for (i in 1:nrow(cv.ct$cptable)){
+      pruned.ct <- prune(cv.ct, 
+                   cp = cv.ct$cptable[i])
+      pruned.ct.point.pred.train <- predict(pruned.ct,valid.df,type = "class")
+      c[i] <- confusionMatrix(pruned.ct.point.pred.train, valid.df$Car_Cancellation)$overall[1]
+}
+
+c
+
+# prune the tree with second large cp and use it to predict validation data 
+pruned.ct <- prune(cv.ct, 
+                   cp = cv.ct$cptable[2])
+length(pruned.ct$frame$var[pruned.ct$frame$var == "<leaf>"])
+prp(pruned.ct, type = 1, extra = 1, split.font = 1, varlen = -20, box.col=ifelse(pruned.ct$frame$var == "<leaf>", 'gray', 'white'))  
+
+pruned.ct.point.pred.train <- predict(pruned.ct,valid.df,type = "class")
+confusionMatrix(pruned.ct.point.pred.train, valid.df$Car_Cancellation)
+```
+##list the decision rules 
+1. IF (online booking = 0) THEN (Class = 0)
+2. IF (online booking = 1) AND (time_lag >= 0.35) AND (from_lat < 13) Then (Class = 1)
+3. IF (online booking = 1) AND (time_lag >= 0.35) AND (from_lat >= 13) Then (Class = 0)
+4. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long >= 78) Then (Class = 0)
+5. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat >= 13)       THEN (Class = 0 )
+6. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13) AND    (from_date_weekDays = Monday, Satuarday, Tuesday and Wednesday) THEN (Class = 0)
+7. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13) AND    (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag >= 0.12) THEN (Class =    0)
+
+8. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13) AND    (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) THEN (Class =      1)
+10. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13) AND    (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat>= 13) AND (from_long < 78) AND (to_lat >= 13) THEN (Class = 1)
+11. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13) AND    (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat>= 13) AND (from_long < 78) AND (to_lat <  13) AND (from_long >= 78) THEN (Class = 0)
+12. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13) AND    (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat>=    13) AND (from_long < 78) AND (to_lat <  13) AND (from_long < 78) THEN (Class = 1)
+13. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13) AND    (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat>=    13) AND (from_long >= 78) AND (travel_type_id = 1,3) THEN (Class = 0)
+14. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13)      (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat>=    13) AND (from_long >= 78) AND (travel_type_id = 2) AND ???to_lat <13) THEN (Class = 1)
+15. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13)      (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat>=    13) AND (from_long >= 78) AND (travel_type_id = 2)AND (to_lat >= 13) AND(to_long < 78)       THEN (Class = 1)
+16.  IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13)      (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat     >= 13) AND (from_long >= 78) AND (travel_type_id = 2)AND (to_lat >= 13) AND(to_long >=      78) AND (time_lag < 0.68) THEN (Class = 0)
+17. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13)      (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat     >= 13) AND (from_long >= 78) AND (travel_type_id = 2)AND (to_lat >= 13) AND(to_long <         78)AND (time_lag >= 0.68) THEN (Class = 1)
+## Improvement: Boosted tree
+We were not satisfied with performance of our pruned tree, so we used a boosted tree for improvement.
+
+A boosted tree is a combination of results of a number of trees. In the process of building a boosted tree, after building the first tree, the algorithm gives more weights on poorly classified observations. Then the second tree is trained on the weighted data, and the same process goes on. When tree number reaches a specified number, the process ends and the final model is a weighted sum of previous tree models.
+
+To build a boosted tree, we simply loaded adabag package, used the boosting function to build the tree, and predicted on validation data.
+
+The confusionMatrix shows that the boosted tree has higher accuracy and has a more positive true prediction, which is superior to our pruned tree.
+```{r, warning=FALSE, message=FALSE}
+
+#### Table 9.5
+library(adabag)
+
+
+set.seed(1)
+boost <- boosting(Car_Cancellation ~ ., data = train.df)
+pred <- predict(boost, valid.df)
+confusionMatrix(pred$class, valid.df$Car_Cancellation)
+```
+## Preprocessing test data
+To make test data a legal input for our model, we did the same data preprocessing to the test data.
+```{r}
+# Do the same data preprocess on test data
+taxi_test_raw1.df <- read.csv("/Users/yiyao/Desktop/Taxi_new.csv",na.strings="NULL") 
+taxi_test_raw2.df <- read.csv("/Users/yiyao/Desktop/Taxi_new.csv")                   
+taxi_test.df <- taxi_test_raw1.df[ , -c(1, 2, 4, 6, 7, 8, 9, 11)]  
+
+taxi_test.df$online_booking = as.factor(taxi_test.df$online_booking) 
+taxi_test.df$mobile_site_booking = as.factor(taxi_test.df$mobile_site_booking) 
+taxi_test.df$travel_type_id = as.factor(taxi_test.df$travel_type_id)
+taxi_test.df$from_lat = taxi_test_raw2.df$from_lat 
+taxi_test.df$from_long = taxi_test_raw2.df$from_long 
+
+
+taxi_test.df$time_lag <- as.numeric(taxi_test.df$from_date - taxi_test.df$booking_created)
+taxi_test.df$from_date <- as.Date(taxi_test.df$from_date, origin = "1899-12-30")
+taxi_test.df$from_date_weekDays <- weekdays(as.Date(taxi_test.df$from_date))
+taxi_test.df$from_date_weekDays = as.factor(taxi_test.df$from_date_weekDays)
+taxi_test.df <- taxi_test.df[ , -c(3, 6)] 
+```
+
+## Predict on test data
+Finally, we decided to predict test data with boosted tree model, which has best performance of our models, and output the predictions into csv file "Test_predicted.csv".
+```{r}
+pred <- predict(boost, taxi_test.df)
+taxi_test_raw2.df$Car_Cancellation <- pred$class
+write.csv(taxi_test_raw2.df, file = "Test_predicted.csv")
+```
+## Report the cancellation row 
+According to the predicted results, row 52 and row 64 have "1" in Car_Cancellation column. So our model predicted that observations at row 52 and 64 would experience a cancellation by the driver.
+
+## Future model improvements
+It is hard to predict cancellations accurately when the sample size is small. So we wish more data are available. Besides, we believe the package_id is a good predictor, but most data in the variable are null. We would also like to know the drivers' rating and customers' rating since high rated drivers usually are less frequently to cancel orders and sometimes drivers will make decisions based on customers' ratings. 
+
+We found that we could use the time/date data more effectively if we could extract the specific time and separate them into different categories, such as "rush hour" and "non-rush hour". It may be an important factor influence the cancellation. What's more, we can use clustering to process the categorical variables with many levels, which will help us reduce the number of categories.
+
+We can also improve the model by employing advanced tree building methods like random forest. These advanced models may perform better on this dataset and subject to less biases result from variable selection or parameter decision.
