@@ -1,4 +1,3 @@
-# predicting-cab-booking-cancellations
 # Predict whether a cab booking will get cancelled
 
 Business Context
