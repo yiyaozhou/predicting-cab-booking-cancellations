@@ -17,20 +17,35 @@ library(rpart)
 library(rpart.plot)
 library(caret)
 
-taxi_all.df <- read.csv("Kaggle_YourCabs_training.csv", na.strings="NULL")
+taxi_all.df <- read.csv("Kaggle_YourCabs_training.csv", na.strings = "NULL")
 str(taxi_all.df)
 summary(taxi_all.df)
 
 # plot
+# Cancellation rate by type of car
+car <- taxi_all.df %>% 
+  group_by(vehicle_model_id) %>% 
+  summarise(Rides = length(vehicle_model_id), 
+            Cancellation = sum(Car_Cancellation)/length(Car_Cancellation)) %>% 
+  ungroup()
+car <- filter(car, Rides >= 100) #Filter out cars with less than 100 rides
+car$vehicle_model_id = factor(car$vehicle_model_id)
+ggplot(car, aes(y = Cancellation, x = vehicle_model_id)) + 
+  geom_bar(stat = "identity", position = "Stack") +
+  theme_light() + 
+  ggtitle("Cancellation rate by vehicle (min 100 rides)") + xlab("vehicle id") + ylab("Average cancellation rate")
+
+
 # Cancellation rate by travelType
 travelType <- taxi_all.df %>% 
   group_by(travel_type_id) %>% 
   summarise(Cancellation = sum(Car_Cancellation)/length(Car_Cancellation))
-ggplot(travelType, aes(y = Cancellation, x = travel_type_id)) + 
+travelType$travel_type_id = factor(travelType$travel_type_id)
+ggplot(travelType, aes(y = Cancellation, x = travel_type_id, fill = travel_type_id)) + 
   geom_bar(stat = "identity", position = "Stack") + 
-  scale_fill_brewer(palette = "Set1") + 
+  scale_fill_brewer(palette = "Blues") + 
   theme_light() + 
-  ggtitle("Cancellation rate by day type of travel") + xlab("")
+  ggtitle("Cancellation rate by day type of travel") 
 
 # Cancellation rate by booking methods
 taxi_all.df$booking_method = NA
@@ -43,19 +58,18 @@ method <- taxi_all.df %>%
 # Bar plot that shows cancellation rate for each type of booking method
 ggplot(method, aes(y = Cancellation, x = booking_method, fill = booking_method)) + 
       geom_bar(stat = "identity", position = "Stack") + 
-      scale_fill_brewer(palette = "Greys") + 
+      scale_fill_brewer(palette = "Blues") + 
       theme_light() + 
       ggtitle("Cancellation rate by method of booking")
 
 # Cancellation rate by weekdays
-taxi_all.df$weekday = weekdays(as.Date(taxi_all.df$from_date))
-weekday <- taxi_all.df %>% 
+taxi_all.df$from_date <- strptime(taxi_all.df$from_date, format = "%m/%d/%Y %H:%M")
+taxi_all.df$weekday <-  weekdays(taxi_all.df$from_date)
+taxi_all.df$weekday <- factor(taxi_all.df$weekday, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+weekday <- taxi_all.df[,-10] %>% 
   group_by(weekday) %>% 
   summarise(Cancellation = sum(Car_Cancellation)/length(Car_Cancellation))
-weekday$weekday  = as.character(weekday$weekday)
-weekday$weekday = factor(weekday$weekday, levels= c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
-weekday = weekday[order(weekday$weekday),]
-weekday = na.omit(weekday)
+
 ggplot(weekday, aes(y = Cancellation, x = weekday, fill = weekday)) + 
   geom_bar(stat = "identity", position = "Stack") + 
   scale_fill_brewer(palette = "Blues") +
@@ -83,53 +97,48 @@ According to analysis, we assume that the factors related to drivers’ “cance
 ## Data preprocessing - Data Cleaning and Aggregation
 We used two approaches to read the dataset: by adding the parameter na.strings = "NULL", we got "to_lat" and "to_long" columns as numeric type; without this parameter, we got "from_lat" and "from_long" as numerical type.These efforts were preparation for future processing.
 
-Then we dropped unrelated columns, such as row and user_id, and columns that contain too many null data, such as package_id, from_city, and to_city variables. Since from_area and to_area are unique to point-to-point travel, we also dropped them and used latitude and longitude variables as location predictors. 
+Then I dropped unrelated columns, such as row and user_id, and columns that contain too many null data, such as package_id, from_city, and to_city variables. Since from_area and to_area are unique to point-to-point travel, I also dropped them and used latitude and longitude variables as location predictors. 
 
-We also converted "Car_Cancellation", "online_booking" and "mobile_site_booking" into factor type. To make the latitude and longitude data consistent, we put the numeric "from_lat" and "from_long" columns in taxi_raw2.df in taxi.df so all the latitude and longitude variables are numeric type now. 
+I also converted "Car_Cancellation", "online_booking" and "mobile_site_booking" into factor type. To make the latitude and longitude data consistent, I put the numeric "from_lat" and "from_long" columns in taxi_raw2.df in taxi.df so all the latitude and longitude variables are numeric type now. 
 
 We decided to leave the NULL entries in the dataset rather than replace them with average or median value. The reason is that tree model can well handle NULL entries without ignoring the whole observation, and putting average or median value in those variables may result in biases in the final tree model.
 
 We also processed the time/date data for effective use. The interval between the booking time and trip start time will affect the cancellation probability, the longer the interval, the higher probability that drivers cancel the order. Therefore, we created a new variable "time_lag" which is the time interval between "booking_created" and "from_date", instead of the two separate time variables. Lastly, to see how weekdays and weekends can affect the order cancellations, we created "from_date_weekDays" variable. 
 
 ```{r, message=FALSE, echo=TRUE}
+taxi.df <- taxi_all.df[, c('vehicle_model_id', 'travel_type_id', 'from_date', 'booking_created', 'weekday', 'booking_method', 'from_lat', 'to_lat', 'from_long', 'to_long', 'Car_Cancellation', 'Cost_of_error')]
 
-taxi_raw1.df <- read.csv("/Users/yiyao/Desktop/Taxi_case.csv",na.strings="NULL") # Read data into raw1 dataframe which read NULL as NA
-taxi_raw2.df <- read.csv("/Users/yiyao/Desktop/Taxi_case.csv")                   # Read data into raw2 dataframe without dealing with NULL
-taxi.df <- taxi_raw1.df[ , -c(1, 2, 4, 6, 7, 8, 9, 11)]  # Drop unrelated columns
+taxi.df$booking_created <- strptime(taxi.df$booking_created, format = "%m/%d/%Y %H:%M")
+taxi.df$waiting <- as.numeric(difftime(taxi.df$from_date, taxi.df$booking_created, units = "mins"))
+taxi.df$vehicle_model_id <- as.factor(taxi.df$vehicle_model_id)
+taxi.df$travel_type_id <- as.factor(taxi.df$travel_type_id)
+taxi.df$booking_method <- as.factor(taxi.df$booking_method)
+taxi.df$Car_Cancellation <- as.factor(taxi.df$Car_Cancellation) # Convert Car_Cancellation into factors
 
-taxi.df$Car_Cancellation = as.factor(taxi.df$Car_Cancellation) # Convert Car_Cancellation into factors
-taxi.df$online_booking = as.factor(taxi.df$online_booking) # Convert online_booking to factors
-taxi.df$mobile_site_booking = as.factor(taxi.df$mobile_site_booking) # Convert mobile_site_booking to factors
-taxi.df$travel_type_id= as.factor(taxi.df$travel_type_id) # Convert travel_type_id to factors
-taxi.df$from_lat = taxi_raw2.df$from_lat # Replace from_lat with the numeric one in raw2 dataframe
-taxi.df$from_long = taxi_raw2.df$from_long # Replace from_long with the numeric one in raw2 dataframe
+taxi.df$distance <- sqrt((taxi.df$to_long - taxi.df$from_long)^2 + 
+                      (taxi.df$to_lat - taxi.df$from_lat)^2)
+# ggplot(taxi.df, aes(distance)) + geom_histogram() # not symmetric, use median
+taxi.df$distance[is.na(taxi.df$distance)] <- median(taxi.df$distance, na.rm = T)
 
-# Convert from_date and booking_created columns to time_lag and from_date_weekDays column
-taxi.df$time_lag <- as.numeric(taxi.df$from_date - taxi.df$booking_created)
-taxi.df$from_date <- as.Date(taxi.df$from_date, origin = "1899-12-30")
-taxi.df$from_date_weekDays <- weekdays(as.Date(taxi.df$from_date))
-taxi.df$from_date_weekDays = as.factor(taxi.df$from_date_weekDays)
-taxi.df <- taxi.df[ , -c(3, 6)] 
+taxi.df <- taxi.df[, c('vehicle_model_id', 'travel_type_id', 'waiting', 'weekday', 'booking_method', 'distance', 'Car_Cancellation', 'Cost_of_error')]
+str(taxi.df)
 ```
 
 ## Summarize the data
 After doing some data preprocessing, we have selected "vehicle_model_id", "travel_type_id", "online_booking", "mobile_site_booking", "from_lat", "from_long", "to_lat", "to_long", "Car_Cancellation", "time_lag",and "from_date_weekDays" as our predictors. 
-```{r}
-str(taxi.df)
-```
+
 Here is a summary of our input variables.
 
-"vehicle_model_id", represents the different vehicle model type. The vehicle model could be related to drivers' wealth, which decides the importance of the job to the driver. 
+"vehicle_model_id", represents the different vehicle model type. 
 
-"travel_type_id", has three different levels(1, 2, 3), which represent "long distance", "point to point", "hourly rental", respectivlely. A longer travel distance may lead to a cancellation.
+"travel_type_id", has three different levels(1, 2, 3), which represent "long distance", "point to point", "hourly rental".
 
-"online_booking" and "mobile_site_booking" are dummy variables, which represent three different booking methods. When "online_booking" = 1, "mobile_site_booking" = 0, it refers to the method "booking online". When "online_booking" = 0, "mobile_site_booking" = 1, it refers to the method "booking on mobile site". When "online_booking" = 0, "mobile_site_booking" = 0, it refers to the method "booking on phone call".
+"waiting" is the time difference between the customers' booking time and the scheduled departure time. It is stored as a numerical variable.
 
-"from_lat" and "from_long" represent the location of the trip start. "to_lat" and "to_long" represent the location of the trip destination. 
+"weekday" is a factor variable, which has 7 levels with weekday labels to identify different weekdays. "booking_method", includes "Mobile Site", 
 
-"time_lag" is the time difference between the customers' booking time and the scheduled departure time. It is stored as a numerical variable.
+"distance", is the manhattan distance calculated from the location of starting point and destination.
 
-"from_date_weekDays" is a factor variable, which has 7 levels with weekday labels to identify different weekdays. 
 
 "Car_Cancellation" is the dependent variable. "1" represents cancellation and "0" represents no cancellation.
 
@@ -220,24 +229,7 @@ prp(pruned.ct, type = 1, extra = 1, split.font = 1, varlen = -20, box.col=ifelse
 pruned.ct.point.pred.train <- predict(pruned.ct,valid.df,type = "class")
 confusionMatrix(pruned.ct.point.pred.train, valid.df$Car_Cancellation)
 ```
-##list the decision rules 
-1. IF (online booking = 0) THEN (Class = 0)
-2. IF (online booking = 1) AND (time_lag >= 0.35) AND (from_lat < 13) Then (Class = 1)
-3. IF (online booking = 1) AND (time_lag >= 0.35) AND (from_lat >= 13) Then (Class = 0)
-4. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long >= 78) Then (Class = 0)
-5. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat >= 13)       THEN (Class = 0 )
-6. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13) AND    (from_date_weekDays = Monday, Satuarday, Tuesday and Wednesday) THEN (Class = 0)
-7. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13) AND    (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag >= 0.12) THEN (Class =    0)
 
-8. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13) AND    (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) THEN (Class =      1)
-10. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13) AND    (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat>= 13) AND (from_long < 78) AND (to_lat >= 13) THEN (Class = 1)
-11. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13) AND    (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat>= 13) AND (from_long < 78) AND (to_lat <  13) AND (from_long >= 78) THEN (Class = 0)
-12. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13) AND    (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat>=    13) AND (from_long < 78) AND (to_lat <  13) AND (from_long < 78) THEN (Class = 1)
-13. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13) AND    (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat>=    13) AND (from_long >= 78) AND (travel_type_id = 1,3) THEN (Class = 0)
-14. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13)      (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat>=    13) AND (from_long >= 78) AND (travel_type_id = 2) AND ???to_lat <13) THEN (Class = 1)
-15. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13)      (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat>=    13) AND (from_long >= 78) AND (travel_type_id = 2)AND (to_lat >= 13) AND(to_long < 78)       THEN (Class = 1)
-16.  IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13)      (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat     >= 13) AND (from_long >= 78) AND (travel_type_id = 2)AND (to_lat >= 13) AND(to_long >=      78) AND (time_lag < 0.68) THEN (Class = 0)
-17. IF (online booking = 1) AND (time_lag < 0.35) AND (to_long < 78) AND (from_lat < 13)      (from_date_weekDays = Thursday, Friday, and Sunday) AND (time_lag < 0.12) AND (from_lat     >= 13) AND (from_long >= 78) AND (travel_type_id = 2)AND (to_lat >= 13) AND(to_long <         78)AND (time_lag >= 0.68) THEN (Class = 1)
 ## Improvement: Boosted tree
 We were not satisfied with performance of our pruned tree, so we used a boosted tree for improvement.
 
